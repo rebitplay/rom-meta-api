@@ -18,7 +18,7 @@ return new class extends Migration
             $table->text('description')->nullable();
             $table->string('region')->nullable();
             $table->unsignedSmallInteger('release_year')->nullable()->index();
-            $table->string('crc', 8)->nullable()->index();
+            $table->string('crc', 12)->nullable()->index();
             $table->string('md5', 32)->nullable()->index();
             $table->string('sha1', 40)->nullable()->index();
             $table->string('serial', 50)->nullable()->index();
