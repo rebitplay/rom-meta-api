@@ -24,6 +24,12 @@ class ImportSystemsCommand extends Command
         $imported = 0;
 
         foreach ($availableSystems as $systemName => $datFile) {
+            // Skip Mobile - J2ME systems
+            if ($systemName === 'Mobile - J2ME') {
+                $bar->advance();
+                continue;
+            }
+
             try {
                 $importer->importSystem($datFile);
                 $imported++;
