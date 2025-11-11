@@ -65,9 +65,13 @@ class ImportGamesCommand extends Command
         }
 
         $this->info("Importing games for: {$system->name}");
+        $this->info("This may take a while for systems with many games...");
 
+        $startTime = microtime(true);
         $imported = $importer->importGames($system, $sources);
+        $duration = round(microtime(true) - $startTime, 2);
 
-        $this->info("Successfully imported {$imported} games");
+        $this->newLine();
+        $this->info("Successfully imported {$imported} games in {$duration}s");
     }
 }

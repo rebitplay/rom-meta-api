@@ -18,28 +18,17 @@ class ImportSystemsCommand extends Command
 
         $this->info('Found ' . count($availableSystems) . ' systems');
 
-        $bar = $this->output->createProgressBar(count($availableSystems));
-        $bar->start();
-
-        $imported = 0;
-
-        foreach ($availableSystems as $systemName => $datFile) {
-            // Skip Mobile - J2ME systems
-            if ($systemName === 'Mobile - J2ME') {
-                $bar->advance();
-                continue;
-            }
-
-            try {
-                $importer->importSystem($datFile);
-                $imported++;
-            } catch (\Exception $e) {
-                $this->error("\nFailed to import {$systemName}: " . $e->getMessage());
+        $imported = $importer->importSystemsBatch($availableSystems, function ($processed, $total) use (&$bar) {
+            if (!isset($bar)) {
+                $bar = $this->output->createProgressBar($total);
+                $bar->start();
             }
             $bar->advance();
-        }
+        });
 
-        $bar->finish();
+        if (isset($bar)) {
+            $bar->finish();
+        }
         $this->newLine(2);
         $this->info("Successfully imported {$imported} systems");
 

@@ -22,6 +22,23 @@ class DatParser
     }
 
     /**
+     * Parse only the header of a DAT file (much faster for system imports)
+     */
+    public function parseHeaderOnly(string $filePath): array
+    {
+        if (!file_exists($filePath)) {
+            throw new \Exception("DAT file not found: {$filePath}");
+        }
+
+        // Read only first 2KB which should contain the header
+        $handle = fopen($filePath, 'r');
+        $content = fread($handle, 2048);
+        fclose($handle);
+
+        return $this->parseHeader($content);
+    }
+
+    /**
      * Parse the clrmamepro header
      */
     public function parseHeader(string $content): array

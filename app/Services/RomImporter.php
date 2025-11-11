@@ -9,6 +9,7 @@ use App\Models\Publisher;
 use App\Models\System;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 class RomImporter
 {
@@ -26,20 +27,70 @@ class RomImporter
      */
     public function importSystem(string $datFilePath): System
     {
-        $data = $this->parser->parse($datFilePath);
-        $header = $data['header'];
+        $header = $this->parser->parseHeaderOnly($datFilePath);
 
         // If no name in header, use filename
         $name = $header['name'] ?? basename($datFilePath, '.dat');
 
         $system = System::updateOrCreate(
             ['name' => $name],
-            ['name' => $name]
+            ['name' => $name, 'slug' => Str::slug($name)]
         );
 
-        Log::info("Imported system: {$system->name}");
-
         return $system;
+    }
+
+    /**
+     * Batch import systems (much faster)
+     */
+    public function importSystemsBatch(array $availableSystems, ?callable $progressCallback = null): int
+    {
+        $systemsToImport = [];
+        $total = count($availableSystems);
+        $processed = 0;
+
+        foreach ($availableSystems as $systemName => $datFile) {
+            // Skip Mobile - J2ME systems
+            if ($systemName === 'Mobile - J2ME') {
+                $processed++;
+                if ($progressCallback) {
+                    $progressCallback($processed, $total);
+                }
+                continue;
+            }
+
+            try {
+                $header = $this->parser->parseHeaderOnly($datFile);
+                $name = $header['name'] ?? basename($datFile, '.dat');
+
+                $systemsToImport[] = [
+                    'name' => $name,
+                    'slug' => Str::slug($name),
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ];
+            } catch (\Exception $e) {
+                Log::error("Failed to parse {$systemName}: " . $e->getMessage());
+            }
+
+            $processed++;
+            if ($progressCallback) {
+                $progressCallback($processed, $total);
+            }
+        }
+
+        // Batch upsert all systems at once
+        if (!empty($systemsToImport)) {
+            System::upsert(
+                $systemsToImport,
+                ['name'], // unique key
+                ['slug', 'updated_at'] // columns to update
+            );
+        }
+
+        Log::info("Imported " . count($systemsToImport) . " systems in batch");
+
+        return count($systemsToImport);
     }
 
     /**
@@ -48,7 +99,7 @@ class RomImporter
     public function importGames(System $system, array $sources = ['dat', 'no-intro', 'redump', 'tosec']): int
     {
         $datFiles = $this->parser->getSystemDatFiles($system->name, $this->libretroDbPath);
-        $imported = 0;
+        $gamesToUpsert = [];
 
         // Process in order of precedence
         foreach ($sources as $source) {
@@ -62,10 +113,41 @@ class RomImporter
             $data = $this->parser->parse($filePath);
 
             foreach ($data['games'] as $gameData) {
-                if ($this->importGame($system, $gameData, $source)) {
-                    $imported++;
+                $processedGame = $this->processGameData($system, $gameData);
+                if ($processedGame) {
+                    // Use CRC as key to deduplicate
+                    $key = $processedGame['crc'] ?? md5($processedGame['name'] . $processedGame['serial']);
+                    $gamesToUpsert[$key] = $processedGame;
                 }
             }
+        }
+
+        // Batch insert/update all games
+        $imported = 0;
+        if (!empty($gamesToUpsert)) {
+            // Process in chunks to avoid memory/query size limits (smaller chunks for SQL limit)
+            $chunks = array_chunk(array_values($gamesToUpsert), 100);
+
+            DB::transaction(function () use ($chunks, &$imported) {
+                foreach ($chunks as $chunk) {
+                    // Prepare data for upsert
+                    $upsertData = [];
+                    foreach ($chunk as $game) {
+                        if (!empty($game['crc'])) {
+                            $upsertData[] = $game;
+                        }
+                    }
+
+                    if (!empty($upsertData)) {
+                        Game::upsert(
+                            $upsertData,
+                            ['system_id', 'crc'], // unique composite key
+                            ['name', 'description', 'region', 'release_year', 'md5', 'sha1', 'serial', 'size', 'filename', 'updated_at']
+                        );
+                        $imported += count($upsertData);
+                    }
+                }
+            });
         }
 
         Log::info("Imported {$imported} games for {$system->name}");
@@ -74,37 +156,25 @@ class RomImporter
     }
 
     /**
-     * Import a single game
+     * Process game data without DB queries
      */
-    protected function importGame(System $system, array $gameData, string $source): bool
+    protected function processGameData(System $system, array $gameData): ?array
     {
         // We need at least a name and a CRC or serial
         if (empty($gameData['name']) && empty($gameData['comment'])) {
-            return false;
+            return null;
         }
 
         if (empty($gameData['crc']) && empty($gameData['serial'])) {
-            return false;
+            return null;
         }
 
         $name = $gameData['name'] ?? $gameData['comment'] ?? 'Unknown';
-        $description = $gameData['description'] ?? null;
 
-        // Try to find existing game by CRC or serial
-        $query = Game::where('system_id', $system->id);
-
-        if (!empty($gameData['crc'])) {
-            $query->where('crc', $gameData['crc']);
-        } elseif (!empty($gameData['serial'])) {
-            $query->where('serial', $gameData['serial']);
-        }
-
-        $existingGame = $query->first();
-
-        $attributes = [
+        return [
             'system_id' => $system->id,
             'name' => $name,
-            'description' => $description,
+            'description' => $gameData['description'] ?? null,
             'region' => $gameData['region'] ?? null,
             'release_year' => !empty($gameData['releaseyear']) ? (int) $gameData['releaseyear'] : null,
             'crc' => $gameData['crc'] ?? null,
@@ -113,21 +183,9 @@ class RomImporter
             'serial' => $gameData['serial'] ?? null,
             'size' => $gameData['size'] ?? null,
             'filename' => $gameData['filename'] ?? null,
+            'created_at' => now(),
+            'updated_at' => now(),
         ];
-
-        if ($existingGame) {
-            // Update only if new data is not null (preserve existing data)
-            foreach ($attributes as $key => $value) {
-                if ($value !== null) {
-                    $existingGame->$key = $value;
-                }
-            }
-            $existingGame->save();
-        } else {
-            Game::create($attributes);
-        }
-
-        return true;
     }
 
     /**
